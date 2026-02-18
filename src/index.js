@@ -442,8 +442,8 @@ app.post('/api/v1/tts/stream', async (req, res) => {
 });
 
 
-const server = app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server listening on port ${PORT}`);
 });
 
 // --- Real-time ASR WebSocket Proxy (Qwen-ASR Realtime) ---
