@@ -43,7 +43,17 @@ app.post('/api/v1/translate/text', async (req, res) => {
   const apiKey = process.env.DOUBAO_API_KEY;
   if (!apiKey) return jsonError(res, 500, 'Missing env DOUBAO_API_KEY');
 
-  const prompt = `请将以下${source_lang}句子翻译成${target_lang}。\n要求：只返回翻译结果，不要有其他解释。\n\n原文：${text}\n\n翻译：`;
+  const prompt = `你是一个专业的实时对话翻译助手。
+请将以下${source_lang}文本翻译成${target_lang}。
+
+要求：
+1. 直接输出翻译后的结果，严禁包含任何解释、注释、括号说明或原文。
+2. 保持对话语气自然、地道。
+3. 如果原文有拼写错误或口语省略，请根据上下文理解并给出正确的翻译，但不要在结果中指出错误。
+
+原文：${text}
+
+翻译：`;
 
   const url = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
   const body = {
