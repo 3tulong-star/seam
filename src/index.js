@@ -544,9 +544,10 @@ rtasrWss.on('connection', (clientWs) => {
       }
 
       const s = msg.session || {};
-      uiConfig.mode = s.mode || uiConfig.mode;
-      uiConfig.leftLang = s.left_lang || s.leftLang || uiConfig.leftLang;
-      uiConfig.rightLang = s.right_lang || s.rightLang || uiConfig.rightLang;
+      // Update uiConfig from session.update, but keep previous values if not provided
+      if (s.mode) uiConfig.mode = s.mode;
+      if (s.left_lang || s.leftLang) uiConfig.leftLang = s.left_lang || s.leftLang;
+      if (s.right_lang || s.rightLang) uiConfig.rightLang = s.right_lang || s.rightLang;
 
       const apiKey = process.env.DASHSCOPE_API_KEY;
       if (!apiKey) {
