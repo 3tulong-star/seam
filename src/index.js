@@ -20,7 +20,7 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '../web/index.html'));
 });
 
-const PORT = process.env.PORT ? Number(process.env.PORT) : 8787;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
 
 function nowMs() {
   return Number(process.hrtime.bigint() / 1000000n);
