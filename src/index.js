@@ -464,6 +464,22 @@ app.get('/api/v1/asr/realtime/debug', (req, res) => {
   });
 });
 
+app.get('/api/v1/debug/env', (req, res) => {
+  res.json({
+    ok: true,
+    port: process.env.PORT ? Number(process.env.PORT) : 8080,
+    env: {
+      NODE_ENV: process.env.NODE_ENV || null,
+      DOUBAO_MODEL: process.env.DOUBAO_MODEL || null,
+      DOUBAO_API_BASE: process.env.DOUBAO_API_BASE || null,
+      QWEN_REALTIME_WS_URL: process.env.QWEN_REALTIME_WS_URL || null,
+      has_DOUBAO_API_KEY: !!process.env.DOUBAO_API_KEY,
+      has_DASHSCOPE_API_KEY: !!process.env.DASHSCOPE_API_KEY,
+      has_DEEPGRAM_API_KEY: !!process.env.DEEPGRAM_API_KEY
+    }
+  });
+});
+
 const server = app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
 });
