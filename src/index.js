@@ -55,9 +55,9 @@ app.post('/api/v1/translate/text', async (req, res) => {
 
 翻译：`;
 
-  const url = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
+  const url = process.env.DOUBAO_API_BASE || 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
   const body = {
-    model: model || process.env.DOUBAO_MODEL || 'doubao-seed-1-6-flash-250828',
+    model: model || process.env.DOUBAO_MODEL || 'doubao-seed-2-0-mini-260215',
     stream: !!stream,
     max_output_tokens: 1024,
     temperature: 0.1,
@@ -216,8 +216,7 @@ app.post('/api/v1/asr', upload.single('audio'), async (req, res) => {
           ]
         },
         parameters: {
-          asr_options: { enable_itn: false },
-          language
+          asr_options: { enable_itn: false }
         }
       };
 
@@ -451,7 +450,6 @@ app.post('/api/v1/tts/stream', async (req, res) => {
   }
 });
 
-
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on port ${PORT}`);
 });
@@ -465,9 +463,44 @@ rtasrWss.on('connection', (clientWs) => {
   console.log('[RT-ASR] client connected');
   let upstream = null;
 
+  const uiConfig = {
+    mode: 'dual_button',
+    leftLang: 'zh',
+    rightLang: 'en'
+  };
+
+  function decideSideAndDirection(leftLang, rightLang, detectedLang) {
+    if (!detectedLang) {
+      return {
+        side: 'left',
+        fromLang: leftLang,
+        toLang: rightLang
+      };
+    }
+    if (detectedLang === leftLang) {
+      return {
+        side: 'left',
+        fromLang: leftLang,
+        toLang: rightLang
+      };
+    }
+    if (detectedLang === rightLang) {
+      return {
+        side: 'right',
+        fromLang: rightLang,
+        toLang: leftLang
+      };
+    }
+    return {
+      side: 'left',
+      fromLang: detectedLang,
+      toLang: rightLang
+    };
+  }
+
   function sendClient(obj) {
     try {
-      clientWs.send(JSON.stringify(obj));
+      clientWs.send(typeof obj === 'string' ? obj : JSON.stringify(obj));
     } catch {}
   }
 
@@ -482,7 +515,6 @@ rtasrWss.on('connection', (clientWs) => {
     }
 
     if (!upstream) {
-      // First message must be session.update
       if (msg?.type !== 'session.update') {
         return sendClient({ type: 'error', error: { message: 'First message must be session.update' } });
       }
@@ -492,12 +524,16 @@ rtasrWss.on('connection', (clientWs) => {
         return sendClient({ type: 'error', error: { message: 'Missing env DASHSCOPE_API_KEY' } });
       }
 
-      // Use model from session.update or default to qwen3-asr-flash-realtime
-      const modelName = msg.session?.model || 'qwen3-asr-flash-realtime';
+      const s = msg.session || {};
+      uiConfig.mode = s.mode || uiConfig.mode;
+      uiConfig.leftLang = s.left_lang || s.leftLang || uiConfig.leftLang;
+      uiConfig.rightLang = s.right_lang || s.rightLang || uiConfig.rightLang;
+
+      const modelName = s.model || 'qwen3-asr-flash-realtime';
       const baseUrl = process.env.QWEN_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
       const url = `${baseUrl}?model=${modelName}`;
-      
-      console.log(`[RT-ASR] connecting to ${url}`);
+
+      console.log(`[RT-ASR] connecting to ${url} with uiConfig=`, uiConfig);
       upstream = new WebSocket(url, {
         headers: {
           Authorization: `Bearer ${apiKey}`
@@ -506,15 +542,15 @@ rtasrWss.on('connection', (clientWs) => {
 
       upstream.on('unexpected-response', (req, res) => {
         let body = '';
-        res.on('data', chunk => body += chunk);
+        res.on('data', (chunk) => (body += chunk));
         res.on('end', () => {
           console.error(`[RT-ASR] Upstream handshake failed. Status: ${res.statusCode}, Body: ${body}`);
-          sendClient({ 
-            type: 'error', 
-            error: { 
+          sendClient({
+            type: 'error',
+            error: {
               message: `Upstream Handshake failed: ${res.statusCode}`,
               detail: body
-            } 
+            }
           });
         });
       });
@@ -526,14 +562,45 @@ rtasrWss.on('connection', (clientWs) => {
 
       upstream.on('message', (data) => {
         try {
-          clientWs.send(typeof data === 'string' ? data : data.toString('utf8'));
+          const text = typeof data === 'string' ? data : data.toString('utf8');
+          let parsed;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            return clientWs.send(text);
+          }
+
+          const evType = parsed?.type;
+          const language = parsed?.language || parsed?.output?.language;
+          const transcript = parsed?.transcript || parsed?.output?.text;
+
+          if (
+            (evType === 'conversation.item.input_audio_transcription.completed' ||
+              evType === 'asr.completed' ||
+              evType === 'transcription.completed') &&
+            (language || transcript)
+          ) {
+            const { side, fromLang, toLang } = decideSideAndDirection(
+              uiConfig.leftLang,
+              uiConfig.rightLang,
+              language
+            );
+            parsed.ui_side = side;
+            parsed.ui_source_lang = fromLang;
+            parsed.ui_target_lang = toLang;
+            parsed.ui_mode = uiConfig.mode;
+          }
+
+          clientWs.send(JSON.stringify(parsed));
         } catch {}
       });
 
       upstream.on('close', (code, reason) => {
         console.log(`[RT-ASR] upstream closed. code=${code}, reason=${reason}`);
         sendClient({ type: 'session.finished', reason: String(reason) });
-        try { clientWs.close(); } catch {}
+        try {
+          clientWs.close();
+        } catch {}
       });
 
       upstream.on('error', (err) => {
@@ -551,7 +618,9 @@ rtasrWss.on('connection', (clientWs) => {
 
   clientWs.on('close', () => {
     console.log('[RT-ASR] client closed');
-    try { upstream?.terminate(); } catch {}
+    try {
+      upstream?.terminate();
+    } catch {}
     upstream = null;
   });
 });
