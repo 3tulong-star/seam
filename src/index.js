@@ -442,8 +442,39 @@ app.post('/api/v1/tts/stream', async (req, res) => {
 });
 
 
+// Debug endpoints to verify WS upgrade headers reach the app.
+app.get('/api/v1/asr/realtime/debug', (req, res) => {
+  const h = req.headers || {};
+  res.json({
+    ok: true,
+    path: req.path,
+    method: req.method,
+    headers: {
+      host: h.host,
+      connection: h.connection,
+      upgrade: h.upgrade,
+      origin: h.origin,
+      'sec-websocket-key': h['sec-websocket-key'],
+      'sec-websocket-version': h['sec-websocket-version'],
+      'sec-websocket-protocol': h['sec-websocket-protocol'],
+      'x-forwarded-for': h['x-forwarded-for'],
+      'x-forwarded-proto': h['x-forwarded-proto'],
+      'x-forwarded-host': h['x-forwarded-host']
+    }
+  });
+});
+
 const server = app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
+});
+
+server.on('upgrade', (request, socket, head) => {
+  const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+  console.log(`[TERMINAL] Upgrade request for ${pathname}`);
+  if (pathname !== '/api/v1/asr/realtime') {
+    console.log(`[TERMINAL] Rejecting upgrade for ${pathname}`);
+    socket.destroy();
+  }
 });
 
 // --- Real-time ASR WebSocket Proxy (Qwen-ASR Realtime) ---
