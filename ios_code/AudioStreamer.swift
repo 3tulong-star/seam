@@ -1,41 +1,63 @@
 import AVFoundation
 
-class AudioStreamer: NSObject {
+final class AudioStreamer: NSObject {
     private let audioEngine = AVAudioEngine()
     private var converter: AVAudioConverter?
+
     var onAudioBuffer: ((String) -> Void)?
 
     func start() throws {
-        let inputNode = audioEngine.inputNode
-        let nativeFormat = inputNode.inputFormat(forBus: 0)
-        let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
-        converter = AVAudioConverter(from: nativeFormat, to: targetFormat)
-        
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { buffer, _ in
-            self.resample(buffer: buffer, targetFormat: targetFormat)
-        }
-        try audioEngine.start()
-    }
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+        try session.setPreferredSampleRate(16000)
+        try session.setActive(true, options: .notifyOthersOnDeactivation)
 
-    private func resample(buffer: AVAudioPCMBuffer, targetFormat: AVAudioFormat) {
-        let ratio = buffer.format.sampleRate / targetFormat.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) / ratio) + 1
-        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
-        
-        var error: NSError?
-        converter?.convert(to: outputBuffer, error: &error) { _, outStatus in
-            outStatus.pointee = .haveData
-            return buffer
+        let inputNode = audioEngine.inputNode
+        let inputFormat = inputNode.inputFormat(forBus: 0)
+        print("AudioStreamer input format:", inputFormat.sampleRate, inputFormat.channelCount)
+
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw NSError(domain: "AudioStreamer", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to create target format"])
         }
-        
-        if let channelData = outputBuffer.int16ChannelData {
-            let data = Data(bytes: channelData[0], count: Int(outputBuffer.frameLength) * 2)
-            onAudioBuffer?(data.base64EncodedString())
+
+        converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+        let bufferSize: AVAudioFrameCount = 1024
+
+        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] buffer, _ in
+            guard let self, let converter = self.converter else { return }
+            if buffer.frameLength == 0 { return }
+
+            let ratio = inputFormat.sampleRate / targetFormat.sampleRate
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) / ratio) + 1
+            guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
+
+            var error: NSError?
+            let status = converter.convert(to: converted, error: &error) { _, outStatus in
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            if status == .error || error != nil { return }
+            if converted.frameLength == 0 { return }
+            guard let ch = converted.int16ChannelData else { return }
+
+            let len = Int(converted.frameLength) * MemoryLayout<Int16>.size
+            let data = Data(bytes: ch[0], count: len)
+            self.onAudioBuffer?(data.base64EncodedString())
         }
+
+        try audioEngine.start()
+        print("AudioStreamer started")
     }
 
     func stop() {
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
+        // 不在这里 setActive(false)，避免打断系统其他音频（TTS）
     }
 }

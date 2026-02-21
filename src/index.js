@@ -43,21 +43,11 @@ app.post('/api/v1/translate/text', async (req, res) => {
   const apiKey = process.env.DOUBAO_API_KEY;
   if (!apiKey) return jsonError(res, 500, 'Missing env DOUBAO_API_KEY');
 
-  const prompt = `你是一个专业的实时对话翻译助手。
-请将以下${source_lang}文本翻译成${target_lang}。
+  const prompt = `请将以下${source_lang}句子翻译成${target_lang}。\n要求：只返回翻译结果，不要有其他解释。\n\n原文：${text}\n\n翻译：`;
 
-要求：
-1. 直接输出翻译后的结果，严禁包含任何解释、注释、括号说明或原文。
-2. 保持对话语气自然、地道。
-3. 如果原文有拼写错误或口语省略，请根据上下文理解并给出正确的翻译，但不要在结果中指出错误。
-
-原文：${text}
-
-翻译：`;
-
-  const url = process.env.DOUBAO_API_BASE || 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
+  const url = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
   const body = {
-    model: model || process.env.DOUBAO_MODEL || 'doubao-seed-2-0-mini-260215',
+    model: model || process.env.DOUBAO_MODEL || 'doubao-seed-1-6-flash-250828',
     stream: !!stream,
     max_output_tokens: 1024,
     temperature: 0.1,
@@ -216,7 +206,8 @@ app.post('/api/v1/asr', upload.single('audio'), async (req, res) => {
           ]
         },
         parameters: {
-          asr_options: { enable_itn: false }
+          asr_options: { enable_itn: false },
+          language
         }
       };
 
@@ -450,8 +441,9 @@ app.post('/api/v1/tts/stream', async (req, res) => {
   }
 });
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server listening on port ${PORT}`);
+
+const server = app.listen(PORT, () => {
+  console.log(`Server listening on http://localhost:${PORT}`);
 });
 
 // --- Real-time ASR WebSocket Proxy (Qwen-ASR Realtime) ---
@@ -463,44 +455,9 @@ rtasrWss.on('connection', (clientWs) => {
   console.log('[RT-ASR] client connected');
   let upstream = null;
 
-  const uiConfig = {
-    mode: 'dual_button',
-    leftLang: 'zh',
-    rightLang: 'en'
-  };
-
-  function decideSideAndDirection(leftLang, rightLang, detectedLang) {
-    if (!detectedLang) {
-      return {
-        side: 'left',
-        fromLang: leftLang,
-        toLang: rightLang
-      };
-    }
-    if (detectedLang === leftLang) {
-      return {
-        side: 'left',
-        fromLang: leftLang,
-        toLang: rightLang
-      };
-    }
-    if (detectedLang === rightLang) {
-      return {
-        side: 'right',
-        fromLang: rightLang,
-        toLang: leftLang
-      };
-    }
-    return {
-      side: 'left',
-      fromLang: detectedLang,
-      toLang: rightLang
-    };
-  }
-
   function sendClient(obj) {
     try {
-      clientWs.send(typeof obj === 'string' ? obj : JSON.stringify(obj));
+      clientWs.send(JSON.stringify(obj));
     } catch {}
   }
 
@@ -515,6 +472,7 @@ rtasrWss.on('connection', (clientWs) => {
     }
 
     if (!upstream) {
+      // First message must be session.update
       if (msg?.type !== 'session.update') {
         return sendClient({ type: 'error', error: { message: 'First message must be session.update' } });
       }
@@ -524,16 +482,12 @@ rtasrWss.on('connection', (clientWs) => {
         return sendClient({ type: 'error', error: { message: 'Missing env DASHSCOPE_API_KEY' } });
       }
 
-      const s = msg.session || {};
-      uiConfig.mode = s.mode || uiConfig.mode;
-      uiConfig.leftLang = s.left_lang || s.leftLang || uiConfig.leftLang;
-      uiConfig.rightLang = s.right_lang || s.rightLang || uiConfig.rightLang;
-
-      const modelName = s.model || 'qwen3-asr-flash-realtime';
+      // Use model from session.update or default to qwen3-asr-flash-realtime
+      const modelName = msg.session?.model || 'qwen3-asr-flash-realtime';
       const baseUrl = process.env.QWEN_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
       const url = `${baseUrl}?model=${modelName}`;
-
-      console.log(`[RT-ASR] connecting to ${url} with uiConfig=`, uiConfig);
+      
+      console.log(`[RT-ASR] connecting to ${url}`);
       upstream = new WebSocket(url, {
         headers: {
           Authorization: `Bearer ${apiKey}`
@@ -542,15 +496,15 @@ rtasrWss.on('connection', (clientWs) => {
 
       upstream.on('unexpected-response', (req, res) => {
         let body = '';
-        res.on('data', (chunk) => (body += chunk));
+        res.on('data', chunk => body += chunk);
         res.on('end', () => {
           console.error(`[RT-ASR] Upstream handshake failed. Status: ${res.statusCode}, Body: ${body}`);
-          sendClient({
-            type: 'error',
-            error: {
+          sendClient({ 
+            type: 'error', 
+            error: { 
               message: `Upstream Handshake failed: ${res.statusCode}`,
               detail: body
-            }
+            } 
           });
         });
       });
@@ -562,45 +516,14 @@ rtasrWss.on('connection', (clientWs) => {
 
       upstream.on('message', (data) => {
         try {
-          const text = typeof data === 'string' ? data : data.toString('utf8');
-          let parsed;
-          try {
-            parsed = JSON.parse(text);
-          } catch {
-            return clientWs.send(text);
-          }
-
-          const evType = parsed?.type;
-          const language = parsed?.language || parsed?.output?.language;
-          const transcript = parsed?.transcript || parsed?.output?.text;
-
-          if (
-            (evType === 'conversation.item.input_audio_transcription.completed' ||
-              evType === 'asr.completed' ||
-              evType === 'transcription.completed') &&
-            (language || transcript)
-          ) {
-            const { side, fromLang, toLang } = decideSideAndDirection(
-              uiConfig.leftLang,
-              uiConfig.rightLang,
-              language
-            );
-            parsed.ui_side = side;
-            parsed.ui_source_lang = fromLang;
-            parsed.ui_target_lang = toLang;
-            parsed.ui_mode = uiConfig.mode;
-          }
-
-          clientWs.send(JSON.stringify(parsed));
+          clientWs.send(typeof data === 'string' ? data : data.toString('utf8'));
         } catch {}
       });
 
       upstream.on('close', (code, reason) => {
         console.log(`[RT-ASR] upstream closed. code=${code}, reason=${reason}`);
         sendClient({ type: 'session.finished', reason: String(reason) });
-        try {
-          clientWs.close();
-        } catch {}
+        try { clientWs.close(); } catch {}
       });
 
       upstream.on('error', (err) => {
@@ -618,9 +541,7 @@ rtasrWss.on('connection', (clientWs) => {
 
   clientWs.on('close', () => {
     console.log('[RT-ASR] client closed');
-    try {
-      upstream?.terminate();
-    } catch {}
+    try { upstream?.terminate(); } catch {}
     upstream = null;
   });
 });
