@@ -502,6 +502,25 @@ rtasrWss.on('connection', (clientWs) => {
   console.log('[RT-ASR] client connected');
   let upstream = null;
 
+  // Session context to store mode and language preferences
+  const uiConfig = {
+    mode: 'dual_button',
+    leftLang: 'zh',
+    rightLang: 'en'
+  };
+
+  function decideSideAndDirection(leftLang, rightLang, detectedLang) {
+    if (!detectedLang) return { side: 'left', fromLang: leftLang, toLang: rightLang };
+    // Exact match
+    if (detectedLang === leftLang) return { side: 'left', fromLang: leftLang, toLang: rightLang };
+    if (detectedLang === rightLang) return { side: 'right', fromLang: rightLang, toLang: leftLang };
+    // Prefix match (e.g., 'en-US' matches 'en')
+    if (detectedLang.startsWith(leftLang)) return { side: 'left', fromLang: leftLang, toLang: rightLang };
+    if (detectedLang.startsWith(rightLang)) return { side: 'right', fromLang: rightLang, toLang: leftLang };
+    // Fallback
+    return { side: 'left', fromLang: detectedLang, toLang: rightLang };
+  }
+
   function sendClient(obj) {
     try {
       clientWs.send(JSON.stringify(obj));
@@ -524,17 +543,22 @@ rtasrWss.on('connection', (clientWs) => {
         return sendClient({ type: 'error', error: { message: 'First message must be session.update' } });
       }
 
+      const s = msg.session || {};
+      uiConfig.mode = s.mode || uiConfig.mode;
+      uiConfig.leftLang = s.left_lang || s.leftLang || uiConfig.leftLang;
+      uiConfig.rightLang = s.right_lang || s.rightLang || uiConfig.rightLang;
+
       const apiKey = process.env.DASHSCOPE_API_KEY;
       if (!apiKey) {
         return sendClient({ type: 'error', error: { message: 'Missing env DASHSCOPE_API_KEY' } });
       }
 
       // Use model from session.update or default to qwen3-asr-flash-realtime
-      const modelName = msg.session?.model || 'qwen3-asr-flash-realtime';
+      const modelName = s.model || 'qwen3-asr-flash-realtime';
       const baseUrl = process.env.QWEN_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
       const url = `${baseUrl}?model=${modelName}`;
       
-      console.log(`[RT-ASR] connecting to ${url}`);
+      console.log(`[RT-ASR] connecting to ${url} with uiConfig:`, uiConfig);
       upstream = new WebSocket(url, {
         headers: {
           Authorization: `Bearer ${apiKey}`
@@ -563,8 +587,28 @@ rtasrWss.on('connection', (clientWs) => {
 
       upstream.on('message', (data) => {
         try {
-          clientWs.send(typeof data === 'string' ? data : data.toString('utf8'));
-        } catch {}
+          const text = typeof data === 'string' ? data : data.toString('utf8');
+          let parsed;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            return clientWs.send(text);
+          }
+
+          // Append UI logic for completed transcription
+          if (parsed.type === 'conversation.item.input_audio_transcription.completed') {
+            const detectedLang = parsed.language;
+            const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, detectedLang);
+            parsed.ui_side = side;
+            parsed.ui_source_lang = fromLang;
+            parsed.ui_target_lang = toLang;
+            parsed.ui_mode = uiConfig.mode;
+          }
+
+          clientWs.send(JSON.stringify(parsed));
+        } catch (e) {
+          console.error('[RT-ASR] error processing upstream message:', e);
+        }
       });
 
       upstream.on('close', (code, reason) => {
